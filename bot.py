@@ -3,21 +3,16 @@ import os, sys, json, re, html, datetime as dt, random
 import requests
 from urllib.parse import urlencode
 
-# =========================
-# Required secrets (set in GitHub → Settings → Secrets → Actions)
-# =========================
+# Secrets
 BLOG_ID = os.environ.get("BLOG_ID", "").strip()
 CLIENT_ID = os.environ.get("CLIENT_ID", "").strip()
 CLIENT_SECRET = os.environ.get("CLIENT_SECRET", "").strip()
 REFRESH_TOKEN = os.environ.get("REFRESH_TOKEN", "").strip()
 
-# Optional
+# Options
 PUBLISH_IMMEDIATELY = os.environ.get("PUBLISH_IMMEDIATELY", "true").lower() == "true"
 BLOG_TIMEZONE = os.environ.get("BLOG_TIMEZONE", "Asia/Kolkata")
 
-# =========================
-# Rotation and freshness
-# =========================
 CATEGORY_ROTATION = [
     "Personal Life and Stories",
     "Food and Recipes",
@@ -30,7 +25,7 @@ CATEGORY_ROTATION = [
     "Fashion",
     "Lists and Roundups",
 ]
-MAX_SIMILARITY = 0.8  # near-duplicate title block
+MAX_SIMILARITY = 0.8
 TITLE_FALLBACK_SUFFIXES = [" Guide", " Essentials", " Explained", " In Practice"]
 
 def require_env():
@@ -39,18 +34,13 @@ def require_env():
             print(f"Missing required secret: {var}", file=sys.stderr)
             sys.exit(1)
 
-# =========================
-# OAuth and Blogger API
-# =========================
 def get_access_token() -> str:
-    token_url = "https://oauth2.googleapis.com/token"
-    data = {
+    r = requests.post("https://oauth2.googleapis.com/token", data={
         "client_id": CLIENT_ID,
         "client_secret": CLIENT_SECRET,
         "refresh_token": REFRESH_TOKEN,
         "grant_type": "refresh_token",
-    }
-    r = requests.post(token_url, data=data, timeout=30)
+    }, timeout=30)
     r.raise_for_status()
     return r.json()["access_token"]
 
@@ -87,9 +77,6 @@ def blogger_insert_post(access_token: str, blog_id: str, title: str, html_conten
     r.raise_for_status()
     return r.json()
 
-# =========================
-# Freshness helpers
-# =========================
 def _norm_title(t: str):
     t = t.lower()
     t = re.sub(r"[^a-z0-9\s]", " ", t)
@@ -137,9 +124,6 @@ def category_used_in_days(cat, recent_posts, days=7):
                 pass
     return False
 
-# =========================
-# Content builder (long-form, like the example)
-# =========================
 def clamp_words(s, minw=8, maxw=14):
     words = s.split()
     if len(words) < minw:
@@ -151,7 +135,7 @@ def clamp_words(s, minw=8, maxw=14):
 
 def build_title_for_category(cat: str) -> str:
     presets = {
-        "Personal Life and Stories": "A Micro-Story About Small Wins And Big Weeks",
+        "Personal Life and Stories": "Small Wins That Quietly Transform Busy Weeks",
         "Food and Recipes": "A Weeknight Paneer Stir-Fry You Can Master Fast",
         "Travel": "A 48-Hour Itinerary For Monsoon Goa That Works",
         "How-To Guides and Tutorials": "A Practical Framework To Reach Inbox Zero This Week",
@@ -166,141 +150,150 @@ def build_title_for_category(cat: str) -> str:
     return clamp_words(base, 8, 14)
 
 def make_html_post(topic_category):
-    # Ensure category is a string label
-    if isinstance(topic_category, list):
-        topic_key = ", ".join([str(x) for x in topic_category])
-    else:
-        topic_key = str(topic_category)
-
+    topic_key = ", ".join(topic_category) if isinstance(topic_category, list) else str(topic_category)
     title = build_title_for_category(topic_key)
     today = dt.datetime.now().strftime("%Y-%m-%d")
+    meta_desc = "Clear steps, examples, visuals, and a checklist—readable in minutes with bolded key actions and simple language."
 
-    # Hero/feature image (royalty-free placeholder)
+    # Images
     feature_img_url = "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?w=1200&q=80"
+    inline_img_url = "https://images.unsplash.com/photo-1496307042754-b4aa456c4a2d?w=1200&q=80"
 
-    # Sectioned body with H2/H3 and multiple paragraphs (like the example)
+    # Key Takeaways (scannable near the top)
+    key_takeaways = """
+<ul>
+  <li><strong>Visible outcome:</strong> Write one clear result for today.</li>
+  <li><strong>Short work blocks:</strong> 20–40 minutes beats long, unfocused sessions.</li>
+  <li><strong>Always end with a next action:</strong> Reduce friction for tomorrow.</li>
+</ul>
+"""
+
     intro = f"""
-<p>In the fast-changing world of everyday work and personal projects, a simple framework can turn scattered effort into reliable progress. This long-form guide walks through clear steps and examples so readers can apply the ideas today—not someday—without new tools or steep learning curves.</p>
-<p>Expect a brief history, core components, practical advantages, common challenges, and a forward look—plus a concise checklist to help verify results as habits form. It’s designed for busy readers who value substance and structure.</p>
+<h2>Introduction</h2>
+<p>Big plans fail when they’re vague and heavy. This guide shows a simple way to make steady progress in {html.escape(topic_key.lower())} with shorter paragraphs, bolded actions, and quick visuals. It’s designed for busy readers who skim first, then dive deeper.</p>
+<p>You’ll see a practical workflow, concrete examples, a checklist, and a brief look ahead—so the next 20 minutes lead to real momentum.</p>
+<p><strong>Key takeaways:</strong></p>
+{key_takeaways}
 """
 
-    evolution = """
-<h2>The Evolution Of Practical Frameworks</h2>
-<h3>From Ad-Hoc To Organized</h3>
-<p>Teams used to rely on ad-hoc processes and heroic sprints. Over time, conventions, patterns, and toolkits emerged so common problems didn’t need to be solved from scratch. This shift reduced friction and made iteration faster.</p>
-<h3>Milestones That Matter</h3>
+    hero = f"""
+<img src="{feature_img_url}" alt="Context image framing the topic in a simple, calm style" />
+<p><em>A contextual visual that frames the topic without distractions.</em></p>
+<p><small>Photo: Unsplash (CC0/Link)</small></p>
+"""
+
+    history = """
+<h2>Brief History</h2>
+<h3>From ad-hoc to simple loops</h3>
+<p>People used to rely on motivation alone. Over time, small loops—state outcome, work briefly, write next action—proved more reliable. These ideas now power most practical frameworks.</p>
 <ul>
-  <li>Clear separation of concerns and repeatable building blocks.</li>
-  <li>Open knowledge-sharing and community-driven improvements.</li>
-  <li>Faster onboarding through shared language and defaults.</li>
+  <li>Less setup, more doing.</li>
+  <li>Shared language and defaults lower friction.</li>
+  <li>Fewer surprises, easier handoffs.</li>
 </ul>
 """
 
-    understanding = f"""
-<h2>Understanding The Framework</h2>
-<h3>What It Is</h3>
-<p>Think of a framework as a practical set of decisions made once, then reused. It’s a map that reduces guesswork and keeps attention on the real work. For {html.escape(topic_key.lower())}, that means simple steps, clear roles, and visible outcomes.</p>
-<h3>Core Components</h3>
+    components = f"""
+<h2>Core Components</h2>
+<h3>What matters most</h3>
 <ul>
-  <li><strong>User Experience:</strong> Keep the path obvious and reduce choice overload.</li>
-  <li><strong>Data Flow:</strong> Ensure information moves predictably with low friction.</li>
-  <li><strong>Feedback Loops:</strong> Add small checks so issues surface early.</li>
+  <li><strong>Outcome sentence:</strong> One line that defines success for today.</li>
+  <li><strong>Time box:</strong> A focused 20–40 minute block; split tasks to fit.</li>
+  <li><strong>Feedback loop:</strong> End with a written next action and one metric.</li>
+</ul>
+<p><em>Example ({html.escape(topic_key)}):</em> “Draft the outline with three subheads, 30 minutes. Next: add examples.”</p>
+"""
+
+    visuals = """
+<h2>Visuals That Help</h2>
+<ul>
+  <li><strong>Simple diagram:</strong> Outcome → Focused Block → Next Action → Repeat</li>
+  <li><strong>Infographic:</strong> 3 advantages, 3 pitfalls, 3 fixes</li>
+</ul>
+<blockquote><strong>Pro tip:</strong> Keep visuals lightweight and fast-loading; clarity beats ornament.</blockquote>
+"""
+
+    second_img = f"""
+<img src="{inline_img_url}" alt="Diagram-like visual showing a small outcome–action loop" />
+<p><em>A minimal loop: outcome → short block → next action → repeat.</em></p>
+<p><small>Photo: Unsplash (CC0/Link)</small></p>
+"""
+
+    examples = f"""
+<h2>Real Examples</h2>
+<h3>Personal</h3>
+<ul>
+  <li><strong>Outcome:</strong> Declutter one shelf. <strong>Block:</strong> 20 minutes. <strong>Next:</strong> Donate box tomorrow.</li>
+</ul>
+<h3>Work</h3>
+<ul>
+  <li><strong>Outcome:</strong> Draft intro section. <strong>Block:</strong> 25 minutes. <strong>Next:</strong> Add two examples.</li>
+</ul>
+<h3>Travel</h3>
+<ul>
+  <li><strong>Outcome:</strong> Pick stays for 2 nights. <strong>Block:</strong> 20 minutes. <strong>Next:</strong> Save two backups.</li>
 </ul>
 """
 
-    advantages = """
-<h2>Advantages</h2>
-<h3>Enhanced Productivity</h3>
-<p>Pre-made building blocks remove busywork. Work sessions focus on outcomes, not setup.</p>
-<h3>Streamlined Processes</h3>
-<p>Consistency lowers the learning curve and improves handoffs between people and tools.</p>
-<h3>Quality And Scalability</h3>
-<p>Shared conventions reduce defects and make growth easier, because improvements happen once and apply everywhere.</p>
+    simplify = """
+<h2>Simplify The Language</h2>
+<ul>
+  <li>Avoid jargon; define terms on first use.</li>
+  <li>Prefer short sentences. Aim for 12–18 words.</li>
+  <li>Bold key actions so skimmers can act fast.</li>
+</ul>
 """
 
-    challenges = """
-<h2>Challenges And Considerations</h2>
-<h3>The Learning Curve</h3>
-<p>New structures feel slower at first. The fix is to adopt in small slices and measure the gains.</p>
-<h3>Collaboration In Practice</h3>
-<p>Version control, shared assets, and clear checklists keep teams aligned without heavy meetings.</p>
-"""
-
-    improved_quality = """
-<h2>Improved Outcomes</h2>
-<h3>Faster Debugging</h3>
-<p>When the path is predictable, issues are easier to isolate and fix quickly.</p>
-<h3>Consistency</h3>
-<p>Similar problems get similar solutions—less surprise, more trust in results.</p>
-<h3>Better Testing</h3>
-<p>Repeatable steps make it simpler to automate checks and catch regressions.</p>
-"""
-
-    cost_effective = """
-<h2>Cost-Effectiveness</h2>
-<p>Routines reduce waste. Shorter setup times and fewer reworks compound into lower costs over weeks and months.</p>
-"""
-
-    future = """
-<h2>The Road Ahead</h2>
-<h3>Low-Code And No-Code</h3>
-<p>Expect more building blocks that non-specialists can combine safely for simple needs.</p>
-<h3>Smarter Assistance</h3>
-<p>Lightweight automation continues to speed up drafting, reviewing, and testing—while humans keep control of decisions.</p>
+    callouts = """
+<h2>Callouts</h2>
+<blockquote><strong>Pro tip:</strong> If energy is low, pick a 10-minute “starter task” to reduce resistance.</blockquote>
+<blockquote><strong>Common mistake:</strong> Working too long. Small blocks beat marathon sessions for consistency.</blockquote>
 """
 
     checklist = """
-<h2>Quick Checklist</h2>
+<h2>Checklist</h2>
 <ul>
-  <li>State today’s outcome in one sentence.</li>
-  <li>Time-box work into 20–40 minute blocks.</li>
-  <li>Split tasks to fit the block length.</li>
-  <li>End with one written next action.</li>
-  <li>Track one metric for seven days.</li>
+  <li><strong>Outcome written</strong> (one sentence)</li>
+  <li><strong>Time box set</strong> (20–40 minutes)</li>
+  <li><strong>Task sized to fit</strong></li>
+  <li><strong>Next action noted</strong></li>
+  <li><strong>One metric tracked</strong> (count, minutes, attempts)</li>
 </ul>
 """
 
     conclusion = """
 <h2>Conclusion</h2>
-<p>Small, reliable structures beat bursts of motivation. With a simple loop—clear outcome, short focused work, and one next action—progress compounds. Keep it lightweight, adjust once a week, and let the routine do the heavy lifting.</p>
+<p>Simple structure wins: outcome, short block, next action. Add one visual, keep sentences short, and use a checklist to verify progress. Do this for a week; review once; adjust the block size if needed.</p>
 <p><strong>Enjoyed this? Leave a comment with your thoughts or questions.</strong></p>
 <p><strong>Love practical reads like this? Follow the blog for three new posts every week.</strong></p>
 """
 
-    # Assemble final HTML
     h1 = f"<h1>{html.escape(title)}</h1>"
-    byline = f"<p><em>By Automation Bot • {dt.datetime.now().strftime('%Y-%m-%d')}</em></p>"
-    hero = f"""
-<img src="{feature_img_url}" alt="Context image framing the article topic" />
-<p><em>A contextual visual that frames the topic without distracting from the content.</em></p>
-<p><small>Photo: Unsplash (CC0/Link)</small></p>
-"""
-    body = "\n".join([h1, byline, intro, hero, evolution, understanding, advantages, challenges, improved_quality, cost_effective, future, checklist, conclusion])
+    byline = f"<p><em>By Automation Bot • {today}</em></p>"
+    meta = f"<!-- Meta Description: {html.escape(meta_desc)} -->"
 
-    # Labels: array of strings
+    body = "\n".join([
+        meta, h1, byline, intro, hero,
+        history, components, visuals, second_img,
+        examples, simplify, callouts, checklist, conclusion
+    ])
+
     labels = [topic_key]
     return title, body, labels
 
-# =========================
-# Main
-# =========================
 def main():
     require_env()
     token = get_access_token()
     recent = blogger_get_recent_posts(token, BLOG_ID, days=30, max_results=50)
     recent_titles = [p.get("title", "") for p in recent if p.get("title")]
 
-    # Pick next category with 7-day cooldown
     cat = next_category(recent)
     spins = 0
     while category_used_in_days(cat, recent, days=7) and spins < len(CATEGORY_ROTATION):
         idx = (CATEGORY_ROTATION.index(cat) + 1) % len(CATEGORY_ROTATION)
-        cat = CATEGORY_ROTATION[idx]
-        spins += 1
+        cat = CATEGORY_ROTATION[idx]; spins += 1
 
     title, html_content, labels = make_html_post(cat)
-
-    # Avoid near-duplicate titles
     if title_is_duplicate(title, recent_titles):
         title = title + random.choice(TITLE_FALLBACK_SUFFIXES)
 
