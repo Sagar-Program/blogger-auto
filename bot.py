@@ -127,7 +127,13 @@ def clamp_words(s, minw=8, maxw=12):
         words = words[:maxw]
     return " ".join(words)
 
-def make_html_post(topic_category: str, angle_note: str):
+def make_html_post(topic_category, angle_note: str):
+    # Ensure the category is a single string key for dict lookups and labels
+    if isinstance(topic_category, list):
+        topic_key = ", ".join([str(x) for x in topic_category])
+    else:
+        topic_key = str(topic_category)
+
     title_map = {
         "Personal Life and Stories": "A Small Habit That Changed My Week",
         "Food and Recipes": "A 30-Minute Weeknight Paneer Stir-Fry",
@@ -140,8 +146,9 @@ def make_html_post(topic_category: str, angle_note: str):
         "Fashion": "Late-Monsoon Wardrobe: 7 Smart Picks",
         "Lists and Roundups": "9 Free Tools To Automate Daily Tasks",
     }
-    raw_title = title_map.get(topic_category, f"Fresh Notes on {topic_category}")
+    raw_title = title_map.get(topic_key, f"Fresh Notes on {topic_key}")
     title = clamp_words(raw_title, 8, 12)
+
     today = dt.datetime.now().strftime("%Y-%m-%d")
     angle_comment = f"<!-- Angle: {angle_note} -->"
     feature_img_url = "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?w=1200&q=80"
@@ -167,7 +174,7 @@ def make_html_post(topic_category: str, angle_note: str):
 <p><strong>TL;DR</strong></p>
 {tl_dr}
 
-<p>{html.escape("Here’s a timely, helpful read aligned to the category: " + topic_category)}.</p>
+<p>{html.escape("Here’s a timely, helpful read aligned to the category: " + topic_key)}.</p>
 
 <img src="{feature_img_url}" alt="Category-related visual showing context" />
 <p><em>A relevant visual that anchors the topic without distracting.</em></p>
@@ -209,7 +216,8 @@ def make_html_post(topic_category: str, angle_note: str):
   <li>[Link: Related Post Title 3]</li>
 </ul>
 """
-    labels = [topic_category]
+    # Labels must be a list of strings for Blogger
+    labels = [topic_key]
     return title, body, labels
 
 def blogger_insert_post(access_token: str, blog_id: str, title: str, html_content: str, labels, is_draft: bool):
