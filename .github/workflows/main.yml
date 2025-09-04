@@ -2,7 +2,7 @@ name: Blogger Auto Publish
 
 on:
   schedule:
-    # 10:00 AM Asia/Kolkata on Mon/Wed/Fri
+    # 10:00 AM Asia/Kolkata on Mon/Wed/Fri (IST is UTC+5:30)
     - cron: "30 4 * * 1,3,5"
   workflow_dispatch:
 
@@ -16,9 +16,11 @@ jobs:
       REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
       PUBLISH_IMMEDIATELY: "true"
       BLOG_TIMEZONE: "Asia/Kolkata"
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      TOKEN_JSON: ${{ secrets.TOKEN_JSON }}
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set timezone (for logs)
@@ -34,14 +36,12 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests markdown python-slugify rapidfuzz google-auth google-auth-oauthlib beautifulsoup4 openai==0.28
+          pip install -r requirements.txt || pip install requests markdown python-slugify rapidfuzz google-auth google-auth-oauthlib beautifulsoup4 openai==0.28
 
-      - name: Create token.json from secret
+      - name: Create token.json safely
         run: |
-          echo "$TOKEN_JSON" > token.json
+          echo "${{ secrets.TOKEN_JSON }}" > token.json
           python -c "import json; json.load(open('token.json'))" || { echo '❌ Invalid token.json'; exit 1; }
-        env:
-          TOKEN_JSON: ${{ secrets.TOKEN_JSON }}
 
       - name: Verify slugify installed
         run: python -c "import slugify; print('slugify OK')"
