@@ -1,0 +1,13 @@
+requests
+
+markdown
+
+python-slugify
+
+rapidfuzz
+
+google-auth
+
+google-auth-oauthlib
+
+beautifulsoup4
