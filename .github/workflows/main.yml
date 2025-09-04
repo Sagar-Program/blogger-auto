@@ -13,19 +13,13 @@ jobs:
       CLIENT_ID: ${{ secrets.CLIENT_ID }}
       CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
       REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
-      PUBLISH_IMMEDIATELY: "true"
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      PUBLISH_IMMEDIATELY: "false"
       BLOG_TIMEZONE: "Asia/Kolkata"
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      TOKEN_JSON: ${{ secrets.TOKEN_JSON }}
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Set timezone (for logs)
-        run: |
-          sudo timedatectl set-timezone Asia/Kolkata
-          date
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -35,19 +29,17 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt || pip install requests markdown python-slugify rapidfuzz google-auth google-auth-oauthlib beautifulsoup4 openai==0.28
+          pip install -r requirements.txt
 
-      - name: Validate and create token.json
+      - name: Create token.json from Secret
         run: |
-          if [ -z "$TOKEN_JSON" ]; then
-            echo "❌ TOKEN_JSON secret is empty. Please set a valid JSON secret."
+          echo '${{ secrets.TOKEN_JSON }}' > token.json
+          if [ ! -s "token.json" ]; then
+            echo "ERROR: token.json is empty. Check your TOKEN_JSON secret."
             exit 1
           fi
-          echo "$TOKEN_JSON" > token.json
-          python -c "import json; json.load(open('token.json'))" || { echo '❌ Invalid token.json'; exit 1; }
+          python -c "import json; json.load(open('token.json'))"
+          echo "✅ token.json is valid JSON."
 
-      - name: Verify slugify installed
-        run: python -c "import slugify; print('slugify OK')"
-
-      - name: Run bot
+      - name: Run Blogger Autopost Bot
         run: python bot.py
