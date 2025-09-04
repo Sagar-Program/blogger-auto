@@ -1,3 +1,8 @@
 requests
-openai==0.28
+markdown
 python-slugify
+rapidfuzz
+google-auth
+google-auth-oauthlib
+beautifulsoup4
+openai==0.28
