@@ -338,6 +338,8 @@ def main():
     
     try:
         creds = get_credentials()
+        print("🔍 DEBUG: Got credentials successfully")
+        print("🔍 DEBUG: Token:", creds.token[:20] + "..." if creds.token else "None")
     except Exception as e:
         print(f"❌ Failed to get credentials: {e}")
         return
@@ -374,6 +376,21 @@ def main():
     publish_immediately = os.getenv("PUBLISH_IMMEDIATELY", "false").lower() == "true"
     publish_time = None if publish_immediately else TODAY_10AM
 
+    # DEBUG: Add debug information
+    print("🔍 DEBUG: Generated Title:", post_title)
+    print("🔍 DEBUG: HTML Content Length:", len(post_html))
+    print("🔍 DEBUG: Publish Time:", publish_time)
+    print("🔍 DEBUG: Blog ID:", BLOG_ID)
+    
+    # Test if we can at least LIST posts successfully
+    try:
+        test_posts = list_recent_posts(creds, max_results=1)
+        print("🔍 DEBUG: Can list posts?", "Yes" if test_posts else "No")
+        if test_posts:
+            print("🔍 DEBUG: Latest post title:", test_posts[0].get('title', 'Unknown'))
+    except Exception as e:
+        print(f"🔍 DEBUG: Error listing posts: {e}")
+
     print("📤 Publishing post...")
     try:
         result = create_blogger_post(creds, post_title, post_html, POST_LABELS, publish_time)
@@ -391,6 +408,8 @@ def main():
 
     except Exception as e:
         print(f"❌ Failed to publish post: {e}")
+        # Additional debug for publish error
+        print("🔍 DEBUG: Full error details:", str(e))
 
 if __name__ == "__main__":
     main()
