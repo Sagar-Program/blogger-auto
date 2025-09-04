@@ -19,7 +19,7 @@ HISTORY_PATH = "post_history.json"
 MAX_HISTORY_DAYS = 30
 TOPIC_COOLDOWN_DAYS = 7
 TITLE_SIMILARITY_BLOCK_DAYS = 30
-TITLE_SIMILARITY_THRESHOLD = 80
+TITLE_SIMILARITY_THRESHOLD = 65
 POST_LABELS = ["Automated", "AI-Generated"]
 BLOG_TZ = pytz.timezone(os.getenv("BLOG_TIMEZONE", "Asia/Kolkata"))
 TODAY_10AM = dt.datetime.now(BLOG_TZ).replace(hour=10, minute=0, second=0, microsecond=0)
@@ -232,6 +232,22 @@ def is_topic_on_cooldown(history: Dict[str, Any], topic: str, cooldown_days: int
     return False
 
 def is_title_too_similar(history: Dict[str, Any], new_title: str, threshold: int = TITLE_SIMILARITY_THRESHOLD, block_days: int = TITLE_SIMILARITY_BLOCK_DAYS) -> bool:
+    """Checks if a new title is too similar to recent posts."""
+    cutoff = dt.datetime.now(pytz.utc) - dt.timedelta(days=block_days)
+    for post in history.get("posts", []):
+        try:
+            post_time = dt.datetime.fromisoformat(post["utc_published"]).replace(tzinfo=pytz.utc)
+            if post_time >= cutoff:
+                similarity = fuzz.token_sort_ratio(new_title.lower(), post["title"].lower())
+                # ADD DEBUG INFO HERE:
+                if similarity >= threshold:
+                    print(f"🔍 DEBUG: Title '{new_title}' is {similarity}% similar to '{post['title']}' (block threshold: {threshold}%)")
+                    return True
+                else:
+                    print(f"🔍 DEBUG: Title '{new_title}' is {similarity}% similar to '{post['title']}' (OK)")
+        except (KeyError, ValueError):
+            continue
+    return False
     cutoff = dt.datetime.now(pytz.utc) - dt.timedelta(days=block_days)
     for post in history.get("posts", []):
         try:
