@@ -1,8 +1,9 @@
-requests
-markdown
-python-slugify
-rapidfuzz
-google-auth
-google-auth-oauthlib
-beautifulsoup4
-openai==0.28
+requests>=2.28.0
+markdown>=3.4.0
+python-slugify>=8.0.0
+rapidfuzz>=3.0.0
+google-auth>=2.0.0
+google-auth-oauthlib>=1.0.0
+openai>=1.0.0
+python-dateutil>=2.8.0
+pytz>=2023.0
