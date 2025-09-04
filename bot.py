@@ -8,9 +8,11 @@ from rapidfuzz import fuzz
 import markdown
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
+import google.generativeai as genai
+import pytz
 
 # ====== CONFIG ======
-BLOG_ID = os.getenv("BLOGGER_BLOG_ID", "YOUR_BLOG_ID_HERE")
+BLOG_ID = os.getenv("BLOGGER_BLOG_ID")
 SCOPES = ["https://www.googleapis.com/auth/blogger"]
 TOKEN_PATH = "token.json"
 HISTORY_PATH = "post_history.json"
@@ -18,98 +20,128 @@ MAX_HISTORY_DAYS = 30
 TOPIC_COOLDOWN_DAYS = 7
 TITLE_SIMILARITY_BLOCK_DAYS = 30
 TITLE_SIMILARITY_THRESHOLD = 80
-POST_LABELS = ["Automated", "Editorial"]
+POST_LABELS = ["Automated", "AI-Generated"]
+BLOG_TZ = pytz.timezone(os.getenv("BLOG_TIMEZONE", "Asia/Kolkata"))
+TODAY_10AM = dt.datetime.now(BLOG_TZ).replace(hour=10, minute=0, second=0, microsecond=0)
 
 ALLOWED_TOPICS = [
-    "Personal Life and Stories",
-    "Food and Recipes",
-    "Travel",
-    "How-To Guides and Tutorials",
-    "Product Reviews",
-    "Money and Finance",
-    "Productivity",
-    "Health and Fitness",
-    "Fashion",
-    "Lists and Roundups",
+    "Personal Life and Stories", "Food and Recipes", "Travel",
+    "How-To Guides and Tutorials", "Product Reviews", "Money and Finance",
+    "Productivity", "Health and Fitness", "Fashion", "Lists and Roundups",
 ]
 
-SEASONALITY = [
-    "beginner",
-    "advanced",
-    "budget-friendly",
-    "time-saving",
-    "seasonal picks",
-    "this week",
-    "fresh ideas",
-    "step-by-step",
-    "expert tips",
-]
+# ====== GEMINI CLIENT ======
+def get_gemini_client():
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY environment variable is not set.")
+    genai.configure(api_key=api_key)
+    return genai
 
-AUDIENCES = [
-    "students",
-    "busy professionals",
-    "parents",
-    "solo travelers",
-    "beginners",
-    "creators",
-    "remote workers",
-]
+def generate_blog_post_with_gemini(topic: str, angle: str, history_titles: List[str]) -> Dict[str, str]:
+    """
+    Calls the Gemini API to generate a full blog post based on the master prompt.
+    Returns a dict with 'title', 'content_md', 'meta_title', 'meta_description'.
+    """
+    client = get_gemini_client()
+    model = client.GenerativeModel('gemini-1.5-flash')
 
-TRENDS = [
-    "2025 update",
-    "new tools",
-    "current best practices",
-    "what’s working now",
-    "latest insights",
-]
+    system_prompt = f"""You are an expert blog writer and content formatter for an automated Blogger site. Generate fully formatted Markdown posts. Never repeat the same topic or near-duplicate title. Proactively source fresh, relevant angles so each post feels timely and useful.
 
-# ====== OAUTH ======
+    Topic for this post: {topic}
+    Chosen angle: {angle}
+
+    Freshness and variety rules:
+    - Avoid these recent titles: {history_titles[-10:]}
+    - No duplicate topics within 7 days.
+    - Avoid near-duplicate titles within 30 days.
+
+    Follow all formatting, structure, SEO, and style rules from the master prompt precisely.
+    Output ONLY the raw Markdown text, ready to be published.
+    """
+
+    try:
+        response = model.generate_content(system_prompt + f"Generate a fresh, detailed blog post about {topic} from this angle: {angle}.")
+        generated_content = response.text
+
+        lines = generated_content.strip().split('\n')
+        title = lines[0].replace('#', '').strip() if lines[0].startswith('#') else "Generated Blog Post"
+        
+        meta_title, meta_description = "", ""
+        for i, line in enumerate(lines):
+            if line.lower().startswith("meta title:"):
+                meta_title = line.split(":", 1)[1].strip()
+            elif line.lower().startswith("meta description:"):
+                meta_description = line.split(":", 1)[1].strip()
+
+        return {
+            "title": title,
+            "content_md": generated_content,
+            "meta_title": meta_title or title[:60],
+            "meta_description": meta_description or "A practical guide with actionable insights."
+        }
+
+    except Exception as e:
+        print(f"❌ Gemini API error: {e}")
+        return {
+            "title": f"{topic}: Fallback Post",
+            "content_md": f"# {topic}: Fallback Post\n\nThis is a fallback post. The AI content generator encountered an error: {e}",
+            "meta_title": f"{topic}: Fallback Post",
+            "meta_description": "A fallback post."
+        }
+
+# ====== SIMPLIFIED OAUTH ======
 def get_credentials() -> Credentials:
     if not os.path.exists(TOKEN_PATH):
-        raise RuntimeError("Missing token.json for Blogger API credentials.")
-    creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
+        raise RuntimeError("Missing token.json. Please set the TOKEN_JSON secret in GitHub.")
+    
+    with open(TOKEN_PATH, 'r') as f:
+        token_data = json.load(f)
+
+    creds = Credentials(
+        token=token_data.get('token'),
+        refresh_token=token_data.get('refresh_token'),
+        token_uri=token_data.get('token_uri'),
+        client_id=token_data.get('client_id'),
+        client_secret=token_data.get('client_secret'),
+        scopes=token_data.get('scopes')
+    )
+
     if creds and creds.expired and creds.refresh_token:
         creds.refresh(Request())
+
     return creds
 
 # ====== BLOGGER API ======
 API_BASE = "https://www.googleapis.com/blogger/v3"
 
-def list_recent_posts(creds: Credentials, days: int = MAX_HISTORY_DAYS) -> List[Dict[str, Any]]:
-    url = f"{API_BASE}/blogs/{BLOG_ID}/posts"
+def list_recent_posts(creds: Credentials, max_results: int = 50) -> List[Dict[str, Any]]:
     headers = {"Authorization": f"Bearer {creds.token}"}
-    params = {"maxResults": 50, "orderBy": "PUBLISHED"}
-    posts = []
-    while True:
-        r = requests.get(url, headers=headers, params=params, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-        items = data.get("items", [])
-        posts.extend(items)
-        next_page = data.get("nextPageToken")
-        if not next_page or len(posts) >= 200:
-            break
-        params["pageToken"] = next_page
-    cutoff = dt.datetime.utcnow() - dt.timedelta(days=days)
-    filtered = []
-    for p in posts:
-        published = p.get("published")
-        if not published:
-            continue
-        try:
-            pub_dt = dt.datetime.fromisoformat(published.replace("Z", "+00:00"))
-        except Exception:
-            continue
-        if pub_dt >= cutoff:
-            filtered.append(p)
-    return filtered
+    params = {"maxResults": max_results, "orderBy": "PUBLISHED"}
+    all_posts = []
+    url = f"{API_BASE}/blogs/{BLOG_ID}/posts"
 
-def create_blogger_post(creds: Credentials, title: str, html_content: str, labels: List[str]) -> Dict[str, Any]:
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        all_posts.extend(data.get("items", []))
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Error fetching posts: {e}")
+    return all_posts
+
+def create_blogger_post(creds: Credentials, title: str, html_content: str, labels: List[str], publish_time: dt.datetime = None) -> Dict[str, Any]:
     url = f"{API_BASE}/blogs/{BLOG_ID}/posts/"
     headers = {
         "Authorization": f"Bearer {creds.token}",
         "Content-Type": "application/json",
     }
+
+    publish_time_rfc3339 = None
+    if publish_time:
+        publish_time_utc = publish_time.astimezone(pytz.utc)
+        publish_time_rfc3339 = publish_time_utc.isoformat()
+
     payload = {
         "kind": "blogger#post",
         "blog": {"id": BLOG_ID},
@@ -117,239 +149,248 @@ def create_blogger_post(creds: Credentials, title: str, html_content: str, label
         "content": html_content,
         "labels": labels,
     }
-    r = requests.post(url, headers=headers, json=payload, timeout=30)
-    r.raise_for_status()
-    return r.json()
+    if publish_time_rfc3339:
+        payload["published"] = publish_time_rfc3339
 
-# ====== HISTORY ======
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Error creating post: {e}")
+        raise
+
+# ====== HISTORY & FRESHNESS LOGIC ======
 def load_history() -> Dict[str, Any]:
     if os.path.exists(HISTORY_PATH):
-        with open(HISTORY_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(HISTORY_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            return {"posts": []}
     return {"posts": []}
 
-def save_history(hist: Dict[str, Any]):
+def save_history(history: Dict[str, Any]):
     with open(HISTORY_PATH, "w", encoding="utf-8") as f:
-        json.dump(hist, f, ensure_ascii=False, indent=2)
+        json.dump(history, f, ensure_ascii=False, indent=2)
 
-def prune_history(hist: Dict[str, Any]):
-    cutoff = dt.datetime.utcnow() - dt.timedelta(days=MAX_HISTORY_DAYS)
-    keep = []
-    for p in hist.get("posts", []):
-        try:
-            t = dt.datetime.fromisoformat(p["utc_published"])
-        except Exception:
-            continue
-        if t >= cutoff:
-            keep.append(p)
-    hist["posts"] = keep
+def update_history_from_blog(creds: Credentials, history: Dict[str, Any]):
+    recent_posts = list_recent_posts(creds, max_results=50)
+    cutoff = dt.datetime.now(pytz.utc) - dt.timedelta(days=MAX_HISTORY_DAYS)
 
-def topic_blocked_recent(hist: Dict[str, Any], topic: str) -> bool:
-    cutoff = dt.datetime.utcnow() - dt.timedelta(days=TOPIC_COOLDOWN_DAYS)
-    for p in hist.get("posts", []):
-        if p["topic"] == topic:
-            try:
-                t = dt.datetime.fromisoformat(p["utc_published"])
-                if t >= cutoff:
-                    return True
-            except Exception:
-                continue
-    return False
+    for post in recent_posts:
+        title = post.get("title", "")
+        published_str = post.get("published", "")
+        content = post.get("content", "")
 
-def title_too_similar(hist: Dict[str, Any], title: str) -> bool:
-    cutoff = dt.datetime.utcnow() - dt.timedelta(days=TITLE_SIMILARITY_BLOCK_DAYS)
-    for p in hist.get("posts", []):
-        try:
-            t = dt.datetime.fromisoformat(p["utc_published"])
-        except Exception:
-            continue
-        if t >= cutoff:
-            score = fuzz.token_sort_ratio(p["title"].lower(), title.lower())
-            if score >= TITLE_SIMILARITY_THRESHOLD:
-                return True
-    return False
-
-def pick_fresh_topic(hist: Dict[str, Any]) -> str:
-    for topic in ALLOWED_TOPICS:
-        if not topic_blocked_recent(hist, topic):
-            return topic
-    last_used = {t: dt.datetime.min for t in ALLOWED_TOPICS}
-    for p in hist.get("posts", []):
-        if p["topic"] in ALLOWED_TOPICS:
-            try:
-                last_used[p["topic"]] = max(last_used[p["topic"]], dt.datetime.fromisoformat(p["utc_published"]))
-            except Exception:
-                continue
-    return sorted(last_used.items(), key=lambda x: x[1])[0][0]
-
-# ====== CONTENT GENERATION ======
-def generate_angle(topic: str) -> str:
-    today = dt.datetime.utcnow().date()
-    seed = int(today.strftime("%Y%m%d"))
-    idx1 = seed % len(SEASONALITY)
-    idx2 = (seed // 3) % len(AUDIENCES)
-    idx3 = (seed // 7) % len(TRENDS)
-    return f"{SEASONALITY[idx1]} angle for {AUDIENCES[idx2]} with {TRENDS[idx3]}"
-
-def make_title(topic: str, angle: str) -> str:
-    core = topic.split(":")[0]
-    angle_bits = angle.replace("angle", "").strip()
-    title = f"{core}: {angle_bits.title()}"
-    parts = title.split()
-    if len(parts) > 12:
-        title = " ".join(parts[:12])
-    return title
-
-def lorem_paragraphs(n=3) -> List[str]:
-    base = [
-        "This section explains the core ideas with clear, practical guidance.",
-        "Each step is designed to be easy to follow and act on today.",
-        "Where useful, examples illustrate the approach in real scenarios.",
-        "Keep what works, adjust what doesn’t, and iterate with feedback.",
-    ]
-    out = []
-    for i in range(n):
-        p = " ".join(base[i % len(base):] + base[: i % len(base)])
-        out.append(p)
-    return out
-
-def generate_markdown(topic: str, angle: str, title: str) -> str:
-    date_str = dt.datetime.now().strftime("%B %d, %Y")
-    feature_alt = f"{topic} — feature image"
-    feature_url = "https://example.com/feature.jpg"
-    feature_caption = "A representative visual for the topic."
-    feature_credit = "Photo: Example Creator via Unsplash (Free license)"
-
-    md_lines = [
-        f"# {title}",
-        f"By Automated Editorial · {date_str}",
-        "",
-        f"<!-- Topic: {topic} | Angle: {angle} -->",
-        "",
-        "Meta Title: " + title[:58],
-        "Meta Description: Practical, current insights with clear steps and examples.",
-        "",
-        f"![{feature_alt}]({feature_url})",
-        f"_{feature_caption}_",
-        f"{feature_credit}",
-        "",
-        "## TL;DR",
-        "- Key takeaways in a few bullets.",
-        "- Actionable steps with simple examples.",
-        "- Fresh angle aligned with current interests.",
-        "",
-        "## Introduction",
-    ]
-    for p in lorem_paragraphs(2):
-        md_lines.append(p)
-        md_lines.append("")
-    md_lines.append("## Main Ideas")
-    md_lines.append("### Idea One")
-    for p in lorem_paragraphs(1):
-        md_lines.append(p)
-        md_lines.append("")
-    md_lines.append("### Idea Two")
-    for p in lorem_paragraphs(1):
-        md_lines.append(p)
-        md_lines.append("")
-    md_lines.append("## Quick Checklist")
-    md_lines.extend([
-        "- Define the goal.",
-        "- Prepare minimal tools.",
-        "- Take the first small step.",
-        "- Review the result and refine.",
-        "",
-        "## Conclusion",
-    ])
-    for p in lorem_paragraphs(1):
-        md_lines.append(p)
-        md_lines.append("")
-    md_lines.append("> Enjoyed this read? Leave a comment and subscribe for three new posts every week.")
-    return "\n".join(md_lines)
-
-BASE_CSS = """<style> ... </style>"""  # unchanged
-
-def markdown_with_figure(md: str) -> str:
-    lines = md.splitlines()
-    out, i, used_figure = [], 0, False
-    while i < len(lines):
-        line = lines[i]
-        if (not used_figure) and line.strip().startswith("![") and "](" in line:
-            alt = line[line.index("![")+2: line.index("](")]
-            url = line[line.index("](")+2:].rstrip(")")
-            cap, cred = "", ""
-            if i+1 < len(lines) and lines[i+1].strip().startswith("_") and lines[i+1].strip().endswith("_"):
-                cap = lines[i+1].strip().strip("_")
-                i += 1
-            if i+1 < len(lines) and lines[i+1].strip().lower().startswith("photo:"):
-                cred = lines[i+1].strip()
-                i += 1
-            fig_html = f'<figure><img src="{url}" alt="{alt}"/><figcaption>{cap}</figcaption><div class="credit">{cred}</div></figure>'
-            out.append(fig_html)
-            used_figure = True
-        else:
-            out.append(line)
-        i += 1
-    html_body = markdown.markdown("\n".join(out), extensions=["extra", "sane_lists"])
-    return f"{BASE_CSS}<article>{html_body}</article>"
-
-# ====== MAIN ======
-def main():
-    creds = get_credentials()
-    hist = load_history()
-    prune_history(hist)
-
-    recent = list_recent_posts(creds, days=MAX_HISTORY_DAYS)
-    for p in recent:
-        content = p.get("content", "")
-        title = p.get("title", "")
-        pub = p.get("published")
-        if not pub:
-            continue
-        try:
-            utc_published = dt.datetime.fromisoformat(pub.replace("Z", "+00:00")).isoformat()
-        except Exception:
-            continue
-        topic = ""
+        topic = "Unknown"
         if "<!-- Topic:" in content:
             try:
-                frag = content.split("<!-- Topic:", 1)[1]
-                topic = frag.split("|", 1)[0].strip()
-            except Exception:
-                topic = ""
-        hist["posts"].append({
-            "title": title,
-            "topic": topic,
-            "utc_published": utc_published
+                topic_line = content.split("<!-- Topic:")[1].split("-->")[0].strip()
+                topic = topic_line.split("|")[0].strip()
+            except IndexError:
+                pass
+
+        try:
+            published_dt = dt.datetime.fromisoformat(published_str.replace('Z', '+00:00'))
+            if published_dt < cutoff:
+                continue
+            published_utc_str = published_dt.isoformat()
+        except (ValueError, AttributeError):
+            published_utc_str = dt.datetime.now(pytz.utc).isoformat()
+
+        post_exists = any(p.get("title") == title and p.get("utc_published") == published_utc_str for p in history["posts"])
+        if not post_exists:
+            history["posts"].append({
+                "title": title,
+                "topic": topic,
+                "utc_published": published_utc_str
+            })
+    prune_history(history)
+
+def prune_history(history: Dict[str, Any]):
+    if "posts" not in history:
+        history["posts"] = []
+        return
+
+    cutoff = dt.datetime.now(pytz.utc) - dt.timedelta(days=MAX_HISTORY_DAYS)
+    history["posts"] = [
+        p for p in history["posts"]
+        if dt.datetime.fromisoformat(p["utc_published"]).replace(tzinfo=pytz.utc) >= cutoff
+    ]
+
+def is_topic_on_cooldown(history: Dict[str, Any], topic: str, cooldown_days: int = TOPIC_COOLDOWN_DAYS) -> bool:
+    cutoff = dt.datetime.now(pytz.utc) - dt.timedelta(days=cooldown_days)
+    for post in history.get("posts", []):
+        if post.get("topic") == topic:
+            try:
+                post_time = dt.datetime.fromisoformat(post["utc_published"]).replace(tzinfo=pytz.utc)
+                if post_time >= cutoff:
+                    return True
+            except (KeyError, ValueError):
+                continue
+    return False
+
+def is_title_too_similar(history: Dict[str, Any], new_title: str, threshold: int = TITLE_SIMILARITY_THRESHOLD, block_days: int = TITLE_SIMILARITY_BLOCK_DAYS) -> bool:
+    cutoff = dt.datetime.now(pytz.utc) - dt.timedelta(days=block_days)
+    for post in history.get("posts", []):
+        try:
+            post_time = dt.datetime.fromisoformat(post["utc_published"]).replace(tzinfo=pytz.utc)
+            if post_time >= cutoff:
+                similarity = fuzz.token_sort_ratio(new_title.lower(), post["title"].lower())
+                if similarity >= threshold:
+                    return True
+        except (KeyError, ValueError):
+            continue
+    return False
+
+def select_fresh_topic(history: Dict[str, Any]) -> str:
+    available_topics = [t for t in ALLOWED_TOPICS if not is_topic_on_cooldown(history, t)]
+    if available_topics:
+        return available_topics[0]
+
+    topic_last_used = {}
+    for topic in ALLOWED_TOPICS:
+        last_used = dt.datetime.min.replace(tzinfo=pytz.utc)
+        for post in history["posts"]:
+            if post["topic"] == topic:
+                try:
+                    post_time = dt.datetime.fromisoformat(post["utc_published"]).replace(tzinfo=pytz.utc)
+                    if post_time > last_used:
+                        last_used = post_time
+                except (KeyError, ValueError):
+                    pass
+        topic_last_used[topic] = last_used
+    return min(topic_last_used.items(), key=lambda x: x[1])[0]
+
+def generate_fresh_angle(topic: str) -> str:
+    seed = hash(f"{dt.date.today()}{topic}") % (10 ** 8)
+    angles = [
+        f"A beginner's guide to {topic}",
+        f"Advanced techniques for {topic} in 2025",
+        f"Budget-friendly tips for {topic}",
+        f"How to save time with {topic}",
+        f"The ultimate seasonal guide to {topic}",
+        f"This week's best ideas for {topic}",
+        f"Unexpected ways to master {topic}",
+        f"A step-by-step tutorial on {topic}",
+        f"Expert secrets for better {topic}",
+    ]
+    return angles[seed % len(angles)]
+
+# ====== MARKDOWN TO HTML CONVERSION ======
+BASE_CSS = """
+<style>
+article {
+    max-width: 700px;
+    margin: 0 auto;
+    line-height: 1.6;
+    font-size: 18px;
+    color: #333;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif;
+}
+article h1 {
+    font-size: 32px;
+    margin-top: 1.5em;
+    margin-bottom: 0.5em;
+}
+article h2 {
+    font-size: 24px;
+    margin-top: 1.5em;
+    margin-bottom: 0.5em;
+}
+article h3 {
+    font-size: 20px;
+    margin-top: 1.5em;
+    margin-bottom: 0.5em;
+}
+article img {
+    max-width: 100%;
+    height: auto;
+    border-radius: 8px;
+    margin: 1.5em 0;
+}
+article figure {
+    margin: 2em 0;
+    text-align: center;
+}
+article figcaption {
+    font-style: italic;
+    margin-top: 0.5em;
+    color: #666;
+    font-size: 0.9em;
+}
+article .credit {
+    font-size: 0.8em;
+    color: #999;
+    margin-top: 0.25em;
+}
+</style>
+"""
+
+def convert_markdown_to_html(markdown_text: str) -> str:
+    html_content = markdown.markdown(markdown_text, extensions=['extra', 'sane_lists'])
+    return f"{BASE_CSS}\n<article>\n{html_content}\n</article>"
+
+# ====== MAIN EXECUTION ======
+def main():
+    print("🤖 Starting Blogger AutoPost...")
+    
+    try:
+        creds = get_credentials()
+    except Exception as e:
+        print(f"❌ Failed to get credentials: {e}")
+        return
+
+    history = load_history()
+    print("📖 Loaded local history.")
+    
+    try:
+        update_history_from_blog(creds, history)
+        print("🔄 Updated history from live blog.")
+    except Exception as e:
+        print(f"⚠️  Could not update history from blog: {e}. Using local history only.")
+
+    prune_history(history)
+    recent_titles = [p["title"] for p in history["posts"]]
+
+    selected_topic = select_fresh_topic(history)
+    selected_angle = generate_fresh_angle(selected_topic)
+    print(f"🎯 Selected Topic: {selected_topic}")
+    print(f"🎯 Selected Angle: {selected_angle}")
+
+    print("🧠 Generating content with Gemini...")
+    generated_post = generate_blog_post_with_gemini(selected_topic, selected_angle, recent_titles)
+    post_title = generated_post["title"]
+    post_markdown = generated_post["content_md"]
+
+    if is_title_too_similar(history, post_title):
+        print(f"⚠️  Generated title too similar to recent posts: '{post_title}'. Aborting.")
+        return
+
+    print("⚙️ Converting Markdown to HTML...")
+    post_html = convert_markdown_to_html(post_markdown)
+
+    publish_immediately = os.getenv("PUBLISH_IMMEDIATELY", "false").lower() == "true"
+    publish_time = None if publish_immediately else TODAY_10AM
+
+    print("📤 Publishing post...")
+    try:
+        result = create_blogger_post(creds, post_title, post_html, POST_LABELS, publish_time)
+        post_url = result.get('url', 'Unknown URL')
+        print(f"✅ Success! Post published: {post_url}")
+        
+        history["posts"].append({
+            "title": post_title,
+            "topic": selected_topic,
+            "utc_published": dt.datetime.now(pytz.utc).isoformat()
         })
+        prune_history(history)
+        save_history(history)
+        print("💾 History saved.")
 
-    prune_history(hist)
-
-    attempt = 0
-    while True:
-        attempt += 1
-        topic = pick_fresh_topic(hist)
-        angle = generate_angle(topic)
-        title = make_title(topic, angle)
-        if not topic_blocked_recent(hist, topic) and not title_too_similar(hist, title):
-            break
-        if attempt > len(ALLOWED_TOPICS) + 5:
-            break
-
-    md = generate_markdown(topic, angle, title)
-    html = markdown_with_figure(md)
-
-    post = create_blogger_post(creds, title, html, POST_LABELS)
-
-    hist["posts"].append({
-        "title": title,
-        "topic": topic,
-        "utc_published": dt.datetime.utcnow().isoformat()
-    })
-    prune_history(hist)
-    save_history(hist)
-
-    print("✅ Posted:", post.get("url"))
+    except Exception as e:
+        print(f"❌ Failed to publish post: {e}")
 
 if __name__ == "__main__":
     main()
