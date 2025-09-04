@@ -1,5 +1,4 @@
 name: Blogger Auto Publish
-
 on:
   schedule:
     # 10:00 AM Asia/Kolkata on Mon/Wed/Fri (IST is UTC+5:30)
@@ -16,6 +15,7 @@ jobs:
       REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
       PUBLISH_IMMEDIATELY: "true"
       BLOG_TIMEZONE: "Asia/Kolkata"
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,11 +30,17 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install dependencies (requirements.txt if present)
         run: |
           python -m pip install --upgrade pip
-          pip install requests
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install requests markdown python-slugify rapidfuzz google-auth google-auth-oauthlib beautifulsoup4
+          fi
+
+      - name: Verify slugify installed
+        run: python -c "import slugify; print('slugify OK')"
 
       - name: Run bot
-        run: |
-          python bot.py
+        run: python bot.py
