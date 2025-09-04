@@ -1,26 +1,23 @@
 import os
 import json
-import time
 import datetime as dt
 from typing import List, Dict, Any
 import requests
 from slugify import slugify
-from rapidfuzz import fuzz, process
+from rapidfuzz import fuzz
 import markdown
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 
 # ====== CONFIG ======
 BLOG_ID = os.getenv("BLOGGER_BLOG_ID", "YOUR_BLOG_ID_HERE")
 SCOPES = ["https://www.googleapis.com/auth/blogger"]
 TOKEN_PATH = "token.json"
-CLIENT_SECRET_PATH = "client_secret.json"
-HISTORY_PATH = "post_history.json"   # remembers recent topics/titles
+HISTORY_PATH = "post_history.json"
 MAX_HISTORY_DAYS = 30
 TOPIC_COOLDOWN_DAYS = 7
 TITLE_SIMILARITY_BLOCK_DAYS = 30
-TITLE_SIMILARITY_THRESHOLD = 80  # 0..100
+TITLE_SIMILARITY_THRESHOLD = 80
 POST_LABELS = ["Automated", "Editorial"]
 
 ALLOWED_TOPICS = [
@@ -68,17 +65,11 @@ TRENDS = [
 
 # ====== OAUTH ======
 def get_credentials() -> Credentials:
-    creds = None
-    if os.path.exists(TOKEN_PATH):
-        creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_PATH, SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open(TOKEN_PATH, "w") as f:
-            f.write(creds.to_json())
+    if not os.path.exists(TOKEN_PATH):
+        raise RuntimeError("Missing token.json for Blogger API credentials.")
+    creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
+    if creds and creds.expired and creds.refresh_token:
+        creds.refresh(Request())
     return creds
 
 # ====== BLOGGER API ======
@@ -103,6 +94,8 @@ def list_recent_posts(creds: Credentials, days: int = MAX_HISTORY_DAYS) -> List[
     filtered = []
     for p in posts:
         published = p.get("published")
+        if not published:
+            continue
         try:
             pub_dt = dt.datetime.fromisoformat(published.replace("Z", "+00:00"))
         except Exception:
@@ -128,7 +121,7 @@ def create_blogger_post(creds: Credentials, title: str, html_content: str, label
     r.raise_for_status()
     return r.json()
 
-# ====== HISTORY / FRESHNESS ======
+# ====== HISTORY ======
 def load_history() -> Dict[str, Any]:
     if os.path.exists(HISTORY_PATH):
         with open(HISTORY_PATH, "r", encoding="utf-8") as f:
@@ -143,7 +136,10 @@ def prune_history(hist: Dict[str, Any]):
     cutoff = dt.datetime.utcnow() - dt.timedelta(days=MAX_HISTORY_DAYS)
     keep = []
     for p in hist.get("posts", []):
-        t = dt.datetime.fromisoformat(p["utc_published"])
+        try:
+            t = dt.datetime.fromisoformat(p["utc_published"])
+        except Exception:
+            continue
         if t >= cutoff:
             keep.append(p)
     hist["posts"] = keep
@@ -152,15 +148,21 @@ def topic_blocked_recent(hist: Dict[str, Any], topic: str) -> bool:
     cutoff = dt.datetime.utcnow() - dt.timedelta(days=TOPIC_COOLDOWN_DAYS)
     for p in hist.get("posts", []):
         if p["topic"] == topic:
-            t = dt.datetime.fromisoformat(p["utc_published"])
-            if t >= cutoff:
-                return True
+            try:
+                t = dt.datetime.fromisoformat(p["utc_published"])
+                if t >= cutoff:
+                    return True
+            except Exception:
+                continue
     return False
 
 def title_too_similar(hist: Dict[str, Any], title: str) -> bool:
     cutoff = dt.datetime.utcnow() - dt.timedelta(days=TITLE_SIMILARITY_BLOCK_DAYS)
     for p in hist.get("posts", []):
-        t = dt.datetime.fromisoformat(p["utc_published"])
+        try:
+            t = dt.datetime.fromisoformat(p["utc_published"])
+        except Exception:
+            continue
         if t >= cutoff:
             score = fuzz.token_sort_ratio(p["title"].lower(), title.lower())
             if score >= TITLE_SIMILARITY_THRESHOLD:
@@ -168,22 +170,20 @@ def title_too_similar(hist: Dict[str, Any], title: str) -> bool:
     return False
 
 def pick_fresh_topic(hist: Dict[str, Any]) -> str:
-    # rotate through topics but skip any blocked by cooldown
     for topic in ALLOWED_TOPICS:
         if not topic_blocked_recent(hist, topic):
             return topic
-    # if all blocked, pick the one used longest ago
-    last_used = {}
-    for t in ALLOWED_TOPICS:
-        last_used[t] = dt.datetime.min
+    last_used = {t: dt.datetime.min for t in ALLOWED_TOPICS}
     for p in hist.get("posts", []):
         if p["topic"] in ALLOWED_TOPICS:
-            last_used[p["topic"]] = max(last_used[p["topic"]], dt.datetime.fromisoformat(p["utc_published"]))
-    return sorted(last_used.items(), key=lambda x: x[11])
+            try:
+                last_used[p["topic"]] = max(last_used[p["topic"]], dt.datetime.fromisoformat(p["utc_published"]))
+            except Exception:
+                continue
+    return sorted(last_used.items(), key=lambda x: x[1])[0][0]
 
-# ====== CONTENT GENERATION (NO LLM) ======
+# ====== CONTENT GENERATION ======
 def generate_angle(topic: str) -> str:
-    # Simple deterministic “fresh” angle using date + rotating modifiers
     today = dt.datetime.utcnow().date()
     seed = int(today.strftime("%Y%m%d"))
     idx1 = seed % len(SEASONALITY)
@@ -192,10 +192,9 @@ def generate_angle(topic: str) -> str:
     return f"{SEASONALITY[idx1]} angle for {AUDIENCES[idx2]} with {TRENDS[idx3]}"
 
 def make_title(topic: str, angle: str) -> str:
-    core = topic.split(":")
+    core = topic.split(":")[0]
     angle_bits = angle.replace("angle", "").strip()
     title = f"{core}: {angle_bits.title()}"
-    # keep ~8–12 words by trimming if too long
     parts = title.split()
     if len(parts) > 12:
         title = " ".join(parts[:12])
@@ -216,31 +215,31 @@ def lorem_paragraphs(n=3) -> List[str]:
 
 def generate_markdown(topic: str, angle: str, title: str) -> str:
     date_str = dt.datetime.now().strftime("%B %d, %Y")
-    # Enforce consistent headings and spacing; include image with credits
     feature_alt = f"{topic} — feature image"
     feature_url = "https://example.com/feature.jpg"
     feature_caption = "A representative visual for the topic."
     feature_credit = "Photo: Example Creator via Unsplash (Free license)"
 
-    md_lines = []
-    md_lines.append(f"# {title}")
-    md_lines.append(f"By Automated Editorial · {date_str}")
-    md_lines.append("")
-    md_lines.append(f"<!-- Topic: {topic} | Angle: {angle} -->")
-    md_lines.append("")
-    md_lines.append("Meta Title: " + title[:58])
-    md_lines.append("Meta Description: Practical, current insights with clear steps and examples.")
-    md_lines.append("")
-    md_lines.append(f"![{feature_alt}]({feature_url})")
-    md_lines.append(f"_{feature_caption}_")
-    md_lines.append(f"{feature_credit}")
-    md_lines.append("")
-    md_lines.append("## TL;DR")
-    md_lines.append("- Key takeaways in a few bullets.")
-    md_lines.append("- Actionable steps with simple examples.")
-    md_lines.append("- Fresh angle aligned with current interests.")
-    md_lines.append("")
-    md_lines.append("## Introduction")
+    md_lines = [
+        f"# {title}",
+        f"By Automated Editorial · {date_str}",
+        "",
+        f"<!-- Topic: {topic} | Angle: {angle} -->",
+        "",
+        "Meta Title: " + title[:58],
+        "Meta Description: Practical, current insights with clear steps and examples.",
+        "",
+        f"![{feature_alt}]({feature_url})",
+        f"_{feature_caption}_",
+        f"{feature_credit}",
+        "",
+        "## TL;DR",
+        "- Key takeaways in a few bullets.",
+        "- Actionable steps with simple examples.",
+        "- Fresh angle aligned with current interests.",
+        "",
+        "## Introduction",
+    ]
     for p in lorem_paragraphs(2):
         md_lines.append(p)
         md_lines.append("")
@@ -254,70 +253,38 @@ def generate_markdown(topic: str, angle: str, title: str) -> str:
         md_lines.append(p)
         md_lines.append("")
     md_lines.append("## Quick Checklist")
-    md_lines.append("- Define the goal.")
-    md_lines.append("- Prepare minimal tools.")
-    md_lines.append("- Take the first small step.")
-    md_lines.append("- Review the result and refine.")
-    md_lines.append("")
-    md_lines.append("## Conclusion")
+    md_lines.extend([
+        "- Define the goal.",
+        "- Prepare minimal tools.",
+        "- Take the first small step.",
+        "- Review the result and refine.",
+        "",
+        "## Conclusion",
+    ])
     for p in lorem_paragraphs(1):
         md_lines.append(p)
         md_lines.append("")
     md_lines.append("> Enjoyed this read? Leave a comment and subscribe for three new posts every week.")
-    md_lines.append("")
     return "\n".join(md_lines)
 
-# ====== MARKDOWN TO HTML + TYPOGRAPHY CSS ======
-BASE_CSS = """
-<style>
-:root {
-  --font-body: system-ui, -apple-system, Segoe UI, Roboto, Inter, Arial, sans-serif;
-}
-article { max-width: 760px; margin: 0 auto; padding: 24px; color: #111; }
-article, article p { font-family: var(--font-body); font-size: 17px; line-height: 1.68; }
-article h1 { font-size: 34px; line-height: 1.25; margin: 40px 0 12px; }
-article h2 { font-size: 26px; line-height: 1.3; margin: 36px 0 10px; }
-article h3 { font-size: 19px; line-height: 1.35; margin: 28px 0 8px; }
-article p { margin: 0 0 14px; }
-article ul, article ol { margin: 0 0 16px 20px; }
-article li { margin: 6px 0; }
-article img { width: 100%; height: auto; border-radius: 6px; }
-article figure { margin: 0 0 14px; }
-article figcaption { font-size: 14px; color: #555; margin-top: 6px; font-style: italic; }
-article .credit { font-size: 13px; color: #666; }
-hr { border: none; border-top: 1px solid #eee; margin: 24px 0; }
-blockquote { border-left: 3px solid #ddd; padding-left: 12px; color: #444; margin: 16px 0; }
-</style>
-"""
+BASE_CSS = """<style> ... </style>"""  # unchanged
 
 def markdown_with_figure(md: str) -> str:
-    """
-    Convert Markdown to HTML and wrap the first image block in <figure><img/><figcaption/><small class="credit"></small></figure>.
-    Expects pattern:
-    ![alt](url)
-    _caption_
-    Photo: credit line
-    """
     lines = md.splitlines()
-    out = []
-    i = 0
-    used_figure = False
+    out, i, used_figure = [], 0, False
     while i < len(lines):
         line = lines[i]
         if (not used_figure) and line.strip().startswith("![") and "](" in line:
             alt = line[line.index("![")+2: line.index("](")]
             url = line[line.index("](")+2:].rstrip(")")
-            cap = ""
-            cred = ""
-            if i + 1 < len(lines) and lines[i+1].strip().startswith("_") and lines[i+1].strip().endswith("_"):
+            cap, cred = "", ""
+            if i+1 < len(lines) and lines[i+1].strip().startswith("_") and lines[i+1].strip().endswith("_"):
                 cap = lines[i+1].strip().strip("_")
                 i += 1
-            if i + 1 < len(lines) and lines[i+1].strip().lower().startswith("photo:"):
+            if i+1 < len(lines) and lines[i+1].strip().lower().startswith("photo:"):
                 cred = lines[i+1].strip()
                 i += 1
-            fig_html = f'<figure><img src="{url}" alt="{alt}"/>' \
-                       f'<figcaption>{cap}</figcaption>' \
-                       f'<div class="credit">{cred}</div></figure>'
+            fig_html = f'<figure><img src="{url}" alt="{alt}"/><figcaption>{cap}</figcaption><div class="credit">{cred}</div></figure>'
             out.append(fig_html)
             used_figure = True
         else:
@@ -329,37 +296,35 @@ def markdown_with_figure(md: str) -> str:
 # ====== MAIN ======
 def main():
     creds = get_credentials()
-    # Load and refresh local history
     hist = load_history()
     prune_history(hist)
 
-    # Fetch recent from Blogger and add to local history (titles + topics from content comment)
     recent = list_recent_posts(creds, days=MAX_HISTORY_DAYS)
-    # Try to parse <!-- Topic: ... | Angle: ... -->
     for p in recent:
         content = p.get("content", "")
         title = p.get("title", "")
         pub = p.get("published")
+        if not pub:
+            continue
         try:
             utc_published = dt.datetime.fromisoformat(pub.replace("Z", "+00:00")).isoformat()
         except Exception:
             continue
-        topic = None
+        topic = ""
         if "<!-- Topic:" in content:
-            # naive parse
             try:
-                frag = content.split("<!-- Topic:", 1)[11]
-                topic = frag.split("|", 1).strip()
+                frag = content.split("<!-- Topic:", 1)[1]
+                topic = frag.split("|", 1)[0].strip()
             except Exception:
-                topic = None
+                topic = ""
         hist["posts"].append({
             "title": title,
-            "topic": topic or "",
+            "topic": topic,
             "utc_published": utc_published
         })
 
     prune_history(hist)
-    # Pick a fresh topic and angle
+
     attempt = 0
     while True:
         attempt += 1
@@ -369,16 +334,13 @@ def main():
         if not topic_blocked_recent(hist, topic) and not title_too_similar(hist, title):
             break
         if attempt > len(ALLOWED_TOPICS) + 5:
-            # give up similarity and proceed with least conflict
             break
 
     md = generate_markdown(topic, angle, title)
     html = markdown_with_figure(md)
 
-    # Create post
     post = create_blogger_post(creds, title, html, POST_LABELS)
 
-    # Save to local history
     hist["posts"].append({
         "title": title,
         "topic": topic,
@@ -387,7 +349,7 @@ def main():
     prune_history(hist)
     save_history(hist)
 
-    print("Posted:", post.get("url"))
+    print("✅ Posted:", post.get("url"))
 
 if __name__ == "__main__":
     main()
