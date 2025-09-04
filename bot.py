@@ -19,7 +19,7 @@ HISTORY_PATH = "post_history.json"
 MAX_HISTORY_DAYS = 30
 TOPIC_COOLDOWN_DAYS = 7
 TITLE_SIMILARITY_BLOCK_DAYS = 30
-TITLE_SIMILARITY_THRESHOLD = 65
+TITLE_SIMILARITY_THRESHOLD = 50  # LOWERED FROM 80 TO 50 (much more flexible)
 POST_LABELS = ["Automated", "AI-Generated"]
 BLOG_TZ = pytz.timezone(os.getenv("BLOG_TIMEZONE", "Asia/Kolkata"))
 TODAY_10AM = dt.datetime.now(BLOG_TZ).replace(hour=10, minute=0, second=0, microsecond=0)
@@ -239,25 +239,15 @@ def is_title_too_similar(history: Dict[str, Any], new_title: str, threshold: int
             post_time = dt.datetime.fromisoformat(post["utc_published"]).replace(tzinfo=pytz.utc)
             if post_time >= cutoff:
                 similarity = fuzz.token_sort_ratio(new_title.lower(), post["title"].lower())
-                # ADD DEBUG INFO HERE:
+                # ADDED DEBUG INFO:
                 if similarity >= threshold:
-                    print(f"🔍 DEBUG: Title '{new_title}' is {similarity}% similar to '{post['title']}' (block threshold: {threshold}%)")
+                    print(f"🚫 BLOCKED: Title '{new_title}' is {similarity}% similar to '{post['title']}' (threshold: {threshold}%)")
                     return True
                 else:
-                    print(f"🔍 DEBUG: Title '{new_title}' is {similarity}% similar to '{post['title']}' (OK)")
+                    print(f"✅ ALLOWED: Title '{new_title}' is {similarity}% similar to '{post['title']}' (threshold: {threshold}%)")
         except (KeyError, ValueError):
             continue
-    return False
-    cutoff = dt.datetime.now(pytz.utc) - dt.timedelta(days=block_days)
-    for post in history.get("posts", []):
-        try:
-            post_time = dt.datetime.fromisoformat(post["utc_published"]).replace(tzinfo=pytz.utc)
-            if post_time >= cutoff:
-                similarity = fuzz.token_sort_ratio(new_title.lower(), post["title"].lower())
-                if similarity >= threshold:
-                    return True
-        except (KeyError, ValueError):
-            continue
+    print(f"✅ Title '{new_title}' passed all similarity checks")
     return False
 
 def select_fresh_topic(history: Dict[str, Any]) -> str:
@@ -312,120 +302,4 @@ article h1 {
 }
 article h2 {
     font-size: 24px;
-    margin-top: 1.5em;
-    margin-bottom: 0.5em;
-}
-article h3 {
-    font-size: 20px;
-    margin-top: 1.5em;
-    margin-bottom: 0.5em;
-}
-article img {
-    max-width: 100%;
-    height: auto;
-    border-radius: 8px;
-    margin: 1.5em 0;
-}
-article figure {
-    margin: 2em 0;
-    text-align: center;
-}
-article figcaption {
-    font-style: italic;
-    margin-top: 0.5em;
-    color: #666;
-    font-size: 0.9em;
-}
-article .credit {
-    font-size: 0.8em;
-    color: #999;
-    margin-top: 0.25em;
-}
-</style>
-"""
-
-def convert_markdown_to_html(markdown_text: str) -> str:
-    html_content = markdown.markdown(markdown_text, extensions=['extra', 'sane_lists'])
-    return f"{BASE_CSS}\n<article>\n{html_content}\n</article>"
-
-# ====== MAIN EXECUTION ======
-def main():
-    print("🤖 Starting Blogger AutoPost...")
-    
-    try:
-        creds = get_credentials()
-        print("🔍 DEBUG: Got credentials successfully")
-        print("🔍 DEBUG: Token:", creds.token[:20] + "..." if creds.token else "None")
-    except Exception as e:
-        print(f"❌ Failed to get credentials: {e}")
-        return
-
-    history = load_history()
-    print("📖 Loaded local history.")
-    
-    try:
-        update_history_from_blog(creds, history)
-        print("🔄 Updated history from live blog.")
-    except Exception as e:
-        print(f"⚠️  Could not update history from blog: {e}. Using local history only.")
-
-    prune_history(history)
-    recent_titles = [p["title"] for p in history["posts"]]
-
-    selected_topic = select_fresh_topic(history)
-    selected_angle = generate_fresh_angle(selected_topic)
-    print(f"🎯 Selected Topic: {selected_topic}")
-    print(f"🎯 Selected Angle: {selected_angle}")
-
-    print("🧠 Generating content with Gemini...")
-    generated_post = generate_blog_post_with_gemini(selected_topic, selected_angle, recent_titles)
-    post_title = generated_post["title"]
-    post_markdown = generated_post["content_md"]
-
-    if is_title_too_similar(history, post_title):
-        print(f"⚠️  Generated title too similar to recent posts: '{post_title}'. Aborting.")
-        return
-
-    print("⚙️ Converting Markdown to HTML...")
-    post_html = convert_markdown_to_html(post_markdown)
-
-    publish_immediately = os.getenv("PUBLISH_IMMEDIATELY", "false").lower() == "true"
-    publish_time = None if publish_immediately else TODAY_10AM
-
-    # DEBUG: Add debug information
-    print("🔍 DEBUG: Generated Title:", post_title)
-    print("🔍 DEBUG: HTML Content Length:", len(post_html))
-    print("🔍 DEBUG: Publish Time:", publish_time)
-    print("🔍 DEBUG: Blog ID:", BLOG_ID)
-    
-    # Test if we can at least LIST posts successfully
-    try:
-        test_posts = list_recent_posts(creds, max_results=1)
-        print("🔍 DEBUG: Can list posts?", "Yes" if test_posts else "No")
-        if test_posts:
-            print("🔍 DEBUG: Latest post title:", test_posts[0].get('title', 'Unknown'))
-    except Exception as e:
-        print(f"🔍 DEBUG: Error listing posts: {e}")
-
-    print("📤 Publishing post...")
-    try:
-        result = create_blogger_post(creds, post_title, post_html, POST_LABELS, publish_time)
-        post_url = result.get('url', 'Unknown URL')
-        print(f"✅ Success! Post published: {post_url}")
-        
-        history["posts"].append({
-            "title": post_title,
-            "topic": selected_topic,
-            "utc_published": dt.datetime.now(pytz.utc).isoformat()
-        })
-        prune_history(history)
-        save_history(history)
-        print("💾 History saved.")
-
-    except Exception as e:
-        print(f"❌ Failed to publish post: {e}")
-        # Additional debug for publish error
-        print("🔍 DEBUG: Full error details:", str(e))
-
-if __name__ == "__main__":
-    main()
+    margin-to
